@@ -54,7 +54,9 @@ class CoLLMLP:
                 for a1 in agents_last_round:
                     self.edges.append(LLMEdge(a1, self.nodes[-1]))
             agents_last_round = self.nodes[-self.agents:]
-
+        
+        for n in self.nodes:
+            n.judge_roles = judge_roles
         if activation == 0:
             self.activation = listwise_ranker_2
             self.activation_cost = 1
@@ -66,6 +68,7 @@ class CoLLMLP:
             edge.zero_weight()
 
     def cut_def_question(self, func_code, question, entry_point):
+        return func_code
         def parse_imports(src_code):
             res = []
             for line in src_code.split("\n"):
@@ -113,15 +116,16 @@ class CoLLMLP:
             elif question.strip() in func_ins_code:
                 func_ins_code = func_ins_code.split(question.strip())[-1]
             elif que_func in func_ins_code:
-                # remove the line before def
-                res_lines = func_ins_code.split("\n")
-                func_ins_code = ""
-                in_func = False
-                for line in res_lines:
-                    if in_func:
-                        func_ins_code += line + "\n"
-                    if "def" in line:
-                        in_func = True
+                # # remove the line before def
+                # res_lines = func_ins_code.split("\n")
+                # func_ins_code = ""
+                # in_func = False
+                # for line in res_lines:
+                #     if in_func:
+                #         func_ins_code += line + "\n"
+                #     if "def" in line:
+                #         in_func = True
+                pass
             else:
                 continue
 
@@ -144,33 +148,6 @@ class CoLLMLP:
                 in_func = True
         
         return "\n".join(import_lines) + "\n" + func_code
-
-    def check_consensus(self, idxs, idx_mask, question, entry_point):
-        return False, None
-        # check consensus based on idxs (range) and idx_mask (actual members, might exceed the range)
-        candidates = [self.nodes[idx].get_answer() for idx in idxs]
-        python_codes = []
-        backup = []
-        for cand in candidates:
-            result = check_function_result(cand)
-            if result["passed"]:
-                python_codes.append(cand)
-            else:
-                backup.append(cand)
-        
-        if len(python_codes) == 0:
-            return False, None
-
-        pred_answers = []
-        for python_code in python_codes:
-            python_code = self.cut_def_question(python_code, question, entry_point)
-            pred_answers.append(python_code)
-
-        consensus_answer, ca_cnt = most_frequent(pred_answers, self.cmp_res)
-        if ca_cnt > math.floor(2/3 * len(idx_mask)):
-            print("Consensus answer: {}".format(consensus_answer))
-            return True, consensus_answer
-        return False, None
 
     def get_final_result(self, idxs, question, entry_point):
         # check consensus based on idxs (range) and idx_mask (actual members, might exceed the range)
@@ -239,7 +216,7 @@ class CoLLMLP:
         for node in self.nodes:
             node.deactivate()
 
-    def forward(self, question, entry_point):
+    def forward(self, task):
         def get_completions():
             # get completions
             completions = [[] for _ in range(self.agents+self.judges)]
@@ -255,8 +232,16 @@ class CoLLMLP:
         total_prompt_tokens, total_completion_tokens = 0, 0
         unit_tests = []
         self.set_allnodes_deactivated()
-        assert self.rounds > 2
-        # question = format_question(question, self.qtype)
+        # assert self.rounds > 2
+
+        question = task.question_content
+        entry_point = task.starter_code
+        FORMATTING_MESSAGE_WITH_STARTER_CODE = "You will use the following starter code to write the solution to the problem and enclose your code within delimiters."
+        FORMATTING_WITHOUT_STARTER_CODE = "Read the inputs from stdin solve the problem and write the answer to stdout (do not directly test on the sample inputs). Enclose your code within delimiters as follows. Ensure that when the python program runs, it reads the inputs, runs the algorithm and writes output to STDOUT."
+        if entry_point:
+            question += f'\n{FORMATTING_MESSAGE_WITH_STARTER_CODE}\n{entry_point}\n'
+        else:
+            question += f'\n{FORMATTING_WITHOUT_STARTER_CODE}\n'
         
         # shuffle the order of agents
         loop_indices = list(range(self.agents))
@@ -266,52 +251,26 @@ class CoLLMLP:
         activated_indices = []
         for idx, node_idx in enumerate(loop_indices):
             print(0, idx)
-            self.nodes[node_idx].activate(question)
+            success = self.nodes[node_idx].activate(question, rid=-1) # Disable reset here
             resp_cnt += 1
             total_prompt_tokens += self.nodes[node_idx].prompt_tokens
             total_completion_tokens += self.nodes[node_idx].completion_tokens
             activated_indices.append(node_idx)
             logprobs[f"{node_idx}.0"] = {"logprobs": self.nodes[node_idx].last_logprobs, "role": self.nodes[node_idx].role, "name": 'agent', 'round': 0, 'idx': idx}
         
-            # if idx >= math.floor(2/3 * self.agents):
-            #     reached, reply = self.check_consensus(activated_indices, list(range(self.agents)), question)
-            #     if reached:
-            #         return reply, resp_cnt, get_completions()
-
-        for idx, node_idx in enumerate(range(self.agents, self.agents+self.judges)):
-            print(0.5, idx)
-            self.nodes[node_idx].activate(question)
-            total_prompt_tokens += self.nodes[node_idx].prompt_tokens
-            total_completion_tokens += self.nodes[node_idx].completion_tokens
-            resp_cnt += self.nodes[node_idx].resp_cost
-            logprobs[f"{node_idx}.0.5"] = {"logprobs": self.nodes[node_idx].last_logprobs, "role": self.nodes[node_idx].role, "name": 'judge', 'round': 0.5, 'idx': idx}
-
-            if self.nodes[node_idx].role == "Tester":
-                unit_tests.extend(self.nodes[node_idx].get_unit_tests())
-
-        loop_indices = list(range(self.agents+self.judges, self.agents*2+self.judges))
-        random.shuffle(loop_indices)
-
-        activated_indices = []
-        for idx, node_idx in enumerate(loop_indices):
-            print(1, idx)
-            self.nodes[node_idx].activate(question)
-            resp_cnt += 1
-            total_prompt_tokens += self.nodes[node_idx].prompt_tokens
-            total_completion_tokens += self.nodes[node_idx].completion_tokens
-            activated_indices.append(node_idx)
-            logprobs[f"{node_idx}.1"] = {"logprobs": self.nodes[node_idx].last_logprobs, "role": self.nodes[node_idx].role, "name": 'agent', 'round': 1, 'idx': idx}
         
-            if idx >= math.floor(2/3 * self.agents):
-                reached, reply = self.check_consensus(activated_indices, list(range(self.agents)), question, entry_point)
-                if reached:
-                    # return reply, resp_cnt, get_completions(), unit_tests
-                    return self.all_tests_and_get_final_result(question, unit_tests, entry_point), resp_cnt, get_completions(), total_prompt_tokens, total_completion_tokens, unit_tests, logprobs
+        # Judge
+        # res = self.run_judges(1, question)
+        # total_prompt_tokens += res[0]
+        # total_completion_tokens += res[1]
+        # resp_cnt += res[2]
+        # unit_tests.extend(res[3])
+        # logprobs.update(res[4])
 
         idx_mask = list(range(self.agents))
         idxs = list(range(self.agents+self.judges, self.agents*2+self.judges))
-        for rid in range(2, self.rounds):
-            if self.agents > 2:
+        for rid in range(1, self.rounds):
+            if (rid >= 2) and (self.agents > 2):
                 replies = [self.nodes[idx].get_answer() for idx in idxs]
                 indices = list(range(len(replies)))
                 random.shuffle(indices)
@@ -324,39 +283,66 @@ class CoLLMLP:
                 total_prompt_tokens += prompt_tokens
                 total_completion_tokens += completion_tokens
 
-            for idx, node_idx in enumerate(range((self.agents+self.judges)*rid-self.judges, (self.agents+self.judges)*rid)):
-                print(rid-0.5, idx)
-                self.nodes[node_idx].activate(question)
+            should_reset = True
+            while should_reset:
+                # Judge
+                res = self.run_judges(rid, question)
+                total_prompt_tokens += res[0]
+                total_completion_tokens += res[1]
+                resp_cnt += res[2]
+                unit_tests.extend(res[3])
+                logprobs.update(res[4])
+
+                # Coders
+                meta_data, should_reset = self.run_coders(rid, question, idx_mask)
+                total_prompt_tokens += meta_data[0]
+                total_completion_tokens += meta_data[1]
+                resp_cnt += meta_data[2]
+            logprobs.update(meta_data[3])
+                
+        completions = get_completions()
+        return self.all_tests_and_get_final_result(question, unit_tests, ''), resp_cnt, completions, total_prompt_tokens, total_completion_tokens, unit_tests, logprobs
+
+    def run_judges(self, rid, question):
+        # Judge
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        resp_cnt = 0
+        unit_tests = []
+        logprobs = dict()
+        for idx, node_idx in enumerate(range((self.agents+self.judges)*rid-self.judges, (self.agents+self.judges)*rid)):
+            print(rid-0.5, idx)
+            self.nodes[node_idx].activate(question)
+            total_prompt_tokens += self.nodes[node_idx].prompt_tokens
+            total_completion_tokens += self.nodes[node_idx].completion_tokens
+            resp_cnt += self.nodes[node_idx].resp_cost
+            logprobs[f"{node_idx}.{rid-0.5}"] = {"logprobs": self.nodes[node_idx].last_logprobs, "role": self.nodes[node_idx].role, "name": 'agent', 'round': rid - 0.5, 'idx': idx}
+
+            if self.nodes[node_idx].role == "Tester":
+                unit_tests.extend(self.nodes[node_idx].get_unit_tests())
+        return total_prompt_tokens, total_completion_tokens, resp_cnt, unit_tests, logprobs
+
+    def run_coders(self, rid, question, idx_mask):
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        resp_cnt = 0
+        logprobs = dict()
+
+        start_index = (self.agents+self.judges)*(rid)
+        loop_indices = list(range(start_index, start_index + self.agents))
+        random.shuffle(loop_indices)
+        for idx, node_idx in enumerate(loop_indices):
+            if idx in idx_mask:
+                print(rid, idx)
+                success = self.nodes[node_idx].activate(question, rid)
+                should_reset = not success
+                if should_reset:
+                    break
+                resp_cnt += 1
                 total_prompt_tokens += self.nodes[node_idx].prompt_tokens
                 total_completion_tokens += self.nodes[node_idx].completion_tokens
-                resp_cnt += self.nodes[node_idx].resp_cost
-                logprobs[f"{node_idx}.{rid-0.5}"] = {"logprobs": self.nodes[node_idx].last_logprobs, "role": self.nodes[node_idx].role, "name": 'agent', 'round': rid - 0.5, 'idx': idx}
-
-                if self.nodes[node_idx].role == "Tester":
-                    unit_tests.extend(self.nodes[node_idx].get_unit_tests())
-
-            loop_indices = list(range((self.agents+self.judges)*rid, (self.agents+self.judges)*(rid)+self.agents))
-            random.shuffle(loop_indices)
-            idxs = []
-            for idx, node_idx in enumerate(loop_indices):
-                if idx in idx_mask:
-                    print(rid, idx)
-                    self.nodes[node_idx].activate(question)
-                    resp_cnt += 1
-                    total_prompt_tokens += self.nodes[node_idx].prompt_tokens
-                    total_completion_tokens += self.nodes[node_idx].completion_tokens
-                    logprobs[f"{node_idx}.{rid}"] = {"logprobs": self.nodes[node_idx].last_logprobs, "role": self.nodes[node_idx].role, "name": 'agent', 'round': rid, 'idx': idx}
-                    idxs.append(node_idx)
-                    if len(idxs) > math.floor(2/3 * len(idx_mask)):
-                        reached, reply = self.check_consensus(idxs, idx_mask, question, entry_point)
-                        if reached:
-                            # return reply, resp_cnt, get_completions(), unit_tests
-                            return self.all_tests_and_get_final_result(question, unit_tests, entry_point), resp_cnt, get_completions(), total_prompt_tokens, total_completion_tokens, unit_tests, logprobs
-        
-        completions = get_completions()
-        # return self.get_final_result(idxs, question), resp_cnt, completions, total_prompt_tokens, total_completion_tokens, unit_tests
-        return self.all_tests_and_get_final_result(question, unit_tests, entry_point), resp_cnt, completions, total_prompt_tokens, total_completion_tokens, unit_tests, logprobs
-
+                logprobs[f"{node_idx}.{rid}"] = {"logprobs": self.nodes[node_idx].last_logprobs, "role": self.nodes[node_idx].role, "name": 'agent', 'round': rid, 'idx': idx}
+        return (total_prompt_tokens, total_completion_tokens, resp_cnt, logprobs), should_reset
 
     def backward(self, result, question, entry_point):
         flag_last = False
@@ -367,10 +353,7 @@ class CoLLMLP:
                 else:
                     continue
 
-                # if rid == self.rounds-1:
-                    # candidates = [idx for idx in range((self.agents+self.judges)*rid, (self.agents+self.judges)*rid+self.agents) if self.nodes[idx].active and check_function_result(self.nodes[idx].get_answer())]
-                # else:
-                    # candidates = [idx for idx in range((self.agents+self.judges)*rid, (self.agents+self.judges)*rid+self.agents) if self.nodes[idx].active and self.cmp_res(self.cut_def_question(self.nodes[idx].get_answer(), question), result)]
+
                 candidates = [idx for idx in range((self.agents+self.judges)*rid, (self.agents+self.judges)*rid+self.agents) if self.nodes[idx].active and check_function_result(question + "\n" + self.cut_def_question(self.nodes[idx].get_answer(), question, entry_point))]
                 ave_w = 1 / len(candidates)
                 for idx in range((self.agents+self.judges)*rid, (self.agents+self.judges)*rid+self.agents):

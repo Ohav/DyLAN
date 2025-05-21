@@ -11,6 +11,13 @@ from human_eval.execution import TimeoutException, create_tempdir, reliability_g
 import multiprocessing
 from threading import Thread
 from typing import Dict, List
+import numpy as np
+import copy
+
+import sys
+sys.path.append('/home/morg/students/ohavbarbi/LiveCodeBench/')
+from lcb_runner.benchmarks.code_generation import load_code_generation_dataset
+from lcb_runner.evaluation.compute_code_generation_metrics import check_correctness
 
 SAVE_LOGPROBS = True
 
@@ -76,6 +83,21 @@ def get_human_eval_qa_pairs():
     problems = [(k, v["prompt"], v["entry_point"]) for k, v in problems.items()]
     return problems
 
+def get_lcb_qa_pairs():
+    # dataset = load_code_generation_dataset()
+    dataset = load_code_generation_dataset(start_date='2024-8-1', end_date='2025-2-1', release_version='release_v5')
+    return dataset
+    # indices = np.arange(len(dataset))
+    # ds = copy.copy(dataset)
+    # np.random.seed(42)
+    # np.random.shuffle(ds)
+    # test_length = int(len(dataset) * 0.3)
+    # test_set = ds[:test_length]
+    # train_set = ds[test_length:]
+    # problems = train_set if train else test_set
+    # return problems
+    
+
 def check_function_result(python_code: str, timeout: float = 5.0) -> Dict:
     """
     Evaluates the functional correctness of a completion by running the test
@@ -135,7 +157,7 @@ def check_function_result(python_code: str, timeout: float = 5.0) -> Dict:
         result=result[0],
     )
 
-def generate_answer(answer_context, model):
+def generate_answer(answer_context, model, count=0):
     # print("question context: ")
     # print(answer_context)
     try:
@@ -152,9 +174,10 @@ def generate_answer(answer_context, model):
     except Exception as e:
         print(e)
         print("retrying due to an error......")
-        raise e
-        # time.sleep(10)
-        # return generate_answer(answer_context, model)
+        if count > 3:
+            raise e
+        time.sleep(1800)
+        return generate_answer(answer_context, model, count=count + 1)
 
     return completion.choices[0].message.content, completion.usage.prompt_tokens, completion.usage.completion_tokens, last_logprobs
 
